@@ -15,8 +15,9 @@ import json
 from typing import Any, Dict
 import traceback
 import asyncio
+from datetime import datetime
 
-from google.adk.agents import Agent, LlmAgent
+from google.adk.agents import Agent, LlmAgent, SequentialAgent
 from google.adk.apps.app import App, EventsCompactionConfig
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import DatabaseSessionService
@@ -53,6 +54,16 @@ APP_NAME = "timeguard_app"
 USER_ID = "timeguard_user"
 SESSION_ID = "timeguard_session"
 _runner: Runner | None = None
+
+# Separate configuration for the history reporting pipeline, which uses a
+# SequentialAgent composed of a summarizer and a coaching agent.
+HISTORY_APP_NAME = "timeguard_history_app"
+HISTORY_SESSION_ID = "timeguard_history_session"
+HISTORY_MODEL_NAME = os.getenv("TIMEGUARD_HISTORY_MODEL_NAME", LLM_MODEL_NAME)
+_history_summarizer: Agent | None = None
+_history_coach: Agent | None = None
+_history_seq_agent: Agent | None = None
+_history_runner: Runner | None = None
 
 
 def get_llm_agent() -> Agent:
@@ -338,9 +349,18 @@ def get_history_events_from_db() -> list[Dict[str, Any]]:
             is_tw = bool(payload.get("is_time_wasting"))
             reason = str(payload.get("reason", ""))
 
+            # Prefer the model event's timestamp if available; fall back to
+            # the user event timestamp that we captured earlier.
+            model_ts = getattr(ev, "timestamp", None)
+            ts_str = (
+                str(model_ts)
+                if model_ts is not None
+                else pending_user.get("timestamp")
+            )
+
             history.append(
                 {
-                    "timestamp": pending_user.get("timestamp"),
+                    "timestamp": ts_str,
                     "url": pending_user["url"],
                     "blocked": is_tw,
                     "reason": reason,
@@ -357,6 +377,213 @@ def get_history_events_from_db() -> list[Dict[str, Any]]:
         # If we're already in an event loop (e.g. called from async context),
         # fall back to an empty list rather than crashing.
         return []
+
+
+def unix_to_local_time(unix_timestamp: float) -> str:
+    """Convert a UNIX timestamp (seconds since epoch) to a local human-readable string.
+
+    Example output: "11:59 p.m. on Nov. 30". Falls back to the numeric value if
+    parsing fails.
+    """
+
+    try:
+        dt = datetime.fromtimestamp(unix_timestamp)
+    except (ValueError, OSError, TypeError):
+        return str(unix_timestamp)
+
+    time_str = dt.strftime("%I:%M %p")  # e.g. "07:05 PM"
+    time_str = time_str.lstrip("0")
+    time_str = (
+        time_str.replace("AM", "a.m.")
+        .replace("PM", "p.m.")
+    )
+
+    month_day = dt.strftime("%b %d")  # e.g. "Nov 30"
+    if " " in month_day:
+        month, day = month_day.split(" ", 1)
+        date_str = f"{month}. {day}"
+    else:
+        date_str = month_day
+
+    return f"{time_str} on {date_str}"
+
+
+def _get_history_summarizer() -> Agent:
+    """Build (once) and return the history summarizer LlmAgent.
+
+    This agent takes the raw browsing events JSON and produces a structured
+    JSON summary. Its textual output is placed into the shared state under
+    the key "history_summary_json" so that downstream agents can reference it
+    in their instructions via {history_summary_json}.
+    """
+
+    global _history_summarizer
+    if _history_summarizer is not None:
+        return _history_summarizer
+
+    _history_summarizer = LlmAgent(
+        name="timeguard_history_summarizer",
+        model=HISTORY_MODEL_NAME,
+        instruction="""\
+            You are a data analyst. You are given a JSON array of browsing events.
+            Each event has: timestamp (ISO string, may be null), url, blocked (boolean), and reason (string).
+
+            Analyze this history and return ONLY a single JSON object (no extra text) with fields such as:
+            - top_sites: list of {"domain": string, "blocks": integer}
+            - peak_hours: list of {"range": string, "blocks": integer}
+            - totals: {"total_events": int, "total_blocks": int}
+            - any other fields you find useful for downstream coaching.
+
+            The output must be valid JSON and must NOT be wrapped in markdown code fences.
+        """,
+        description="Summarizes raw browsing events into structured JSON.",
+        output_key="history_summary_json",
+    )
+
+    return _history_summarizer
+
+
+def _get_history_coach() -> Agent:
+    """Build (once) and return the history coaching LlmAgent.
+
+    This agent reads the JSON summary from the shared state key
+    "history_summary_json" (produced by the summarizer) and turns it into a
+    plain-text productivity report.
+    """
+
+    global _history_coach
+    if _history_coach is not None:
+        return _history_coach
+
+    _history_coach = LlmAgent(
+        name="timeguard_history_coach",
+        model=HISTORY_MODEL_NAME,
+        instruction="""\
+            You are a productivity coach. You are given a JSON summary of a user's browsing history,
+            provided in the placeholder {history_summary_json}.
+
+            Using ONLY the information in this summary JSON, produce a concise plain-text report
+            for the user that:
+            - Describes the top time-wasting sites and how often they were blocked.
+            - Describes any noticeable time-of-day patterns where blocking is frequent.
+            - Provides 2-3 actionable suggestions to improve focus.
+
+            You also have access to a tool called unix_to_local_time which takes a UNIX
+            timestamp (seconds since epoch) and returns a human-readable local time such
+            as "11:59 p.m. on Nov. 30". When explaining time-of-day patterns or giving
+            examples of when blocking is frequent, you must call this tool to turn raw
+            timestamps into clearer descriptions of local times.
+
+            IMPORTANT:
+            - Do NOT use any markdown formatting.
+            - Do NOT use headings, bullet points, numbered lists, or symbols like #, *, -, or •.
+            - Write as one or more simple paragraphs of plain text only.
+            - If any UNIX timestamps (10 digit numbers such as 1764565000) appear, use the 
+            unix_to_local_time tool to rewrite them into a human-readable version.
+
+            Keep the report under 250 words.
+        """,
+        description="Turns a history summary JSON into a user-facing productivity report.",
+        output_key="history_report_text",
+        tools=[unix_to_local_time],
+    )
+
+    return _history_coach
+
+
+def _get_history_sequential_agent() -> Agent:
+    """Build (once) and return the SequentialAgent for history reporting.
+
+    The pipeline is:
+      1) Summarizer -> produces history_summary_json
+      2) Coach      -> produces history_report_text
+    """
+
+    global _history_seq_agent
+    if _history_seq_agent is not None:
+        return _history_seq_agent
+
+    summarizer = _get_history_summarizer()
+    coach = _get_history_coach()
+
+    _history_seq_agent = SequentialAgent(
+        name="timeguard_history_pipeline",
+        sub_agents=[summarizer, coach],
+        description=(
+            "Executes a sequence of history summarization and productivity coaching "
+            "over the user's browsing events."
+        ),
+    )
+
+    return _history_seq_agent
+
+
+def _get_history_runner() -> Runner:
+    """Return a Runner configured for the history SequentialAgent."""
+
+    global _history_runner
+    if _history_runner is not None:
+        return _history_runner
+
+    db_url = "sqlite+aiosqlite:///timeguard_sessions.db"
+    session_service = DatabaseSessionService(db_url=db_url)
+
+    seq_agent = _get_history_sequential_agent()
+
+    _history_runner = Runner(
+        app_name=HISTORY_APP_NAME,
+        agent=seq_agent,
+        session_service=session_service,
+    )
+
+    async def _ensure_session() -> None:
+        session = await session_service.get_session(
+            app_name=HISTORY_APP_NAME,
+            user_id=USER_ID,
+            session_id=HISTORY_SESSION_ID,
+        )
+        if not session:
+            await session_service.create_session(
+                app_name=HISTORY_APP_NAME,
+                user_id=USER_ID,
+                session_id=HISTORY_SESSION_ID,
+            )
+
+    asyncio.run(_ensure_session())
+
+    return _history_runner
+
+
+def generate_history_report_with_adk(events: list[Dict[str, Any]]) -> str:
+    """Run the history SequentialAgent over the given events and return a report.
+
+    The raw events JSON is provided as the initial user message. The
+    SequentialAgent first summarizes the events, then produces a coaching
+    report. We return the final text generated by the coach.
+    """
+
+    runner = _get_history_runner()
+
+    payload = json.dumps(events, indent=2)
+    message = types.UserContent(
+        parts=[types.Part(text="Browsing events JSON:\n" + payload)]
+    )
+
+    final_text: str | None = None
+
+    for event in runner.run(
+        user_id=USER_ID,
+        session_id=HISTORY_SESSION_ID,
+        new_message=message,
+    ):
+        if not event.content or not getattr(event.content, "parts", None):
+            continue
+        part = event.content.parts[0]
+        if not getattr(part, "text", None):
+            continue
+        final_text = part.text
+
+    return final_text or "No history report could be generated."
 
 
 def main(argv: list[str] | None = None) -> int:

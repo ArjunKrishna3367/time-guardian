@@ -1,5 +1,6 @@
 import os
 from typing import Dict, List
+import re
 import google.generativeai as genai
 from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
@@ -26,8 +27,7 @@ CONFIG = {
         "pinterest.com",
         "9gag.com"
     ],
-    "block_duration_minutes": 30,
-    "whitelist": []
+    "block_duration_minutes": 30
 }
 
 # In-memory storage for blocked sites and their unblock times
@@ -66,7 +66,6 @@ def _format_unblock_time_human(unblock_time_iso: str) -> str:
         date_str = month_day
 
     return f"{time_str} on {date_str}"
-
 
 _timeguard_agent_module = None
 
@@ -111,11 +110,6 @@ def is_time_wasting_site(url: str) -> bool:
 def should_block_site(url: str) -> bool:
     """Determine if a site should be blocked based on various factors."""
     global _last_ai_reason
-
-    # Check if site is whitelisted
-    if any(whitelisted in url.lower() for whitelisted in CONFIG["whitelist"]):
-        _last_ai_reason = "Site is whitelisted."
-        return False
 
     # Delegate classification to the TimeGuard agent, falling back to the
     # local heuristic if anything goes wrong.
@@ -210,50 +204,40 @@ def get_blocked_sites():
 def history_report():
     agent_module = load_timeguard_agent()
     get_history_events_from_db = getattr(agent_module, "get_history_events_from_db", None)
-    if get_history_events_from_db is None:
-        return jsonify({"error": "History helper not available in ADK module."}), 500
+    generate_history_report_with_adk = getattr(agent_module, "generate_history_report_with_adk", None)
+    unix_to_local_time = getattr(agent_module, "unix_to_local_time", None)
+
+    if get_history_events_from_db is None or generate_history_report_with_adk is None:
+        return jsonify({"error": "History helpers not available in ADK module."}), 500
 
     events = get_history_events_from_db()
     if not events:
         return jsonify({"report": "No browsing history has been recorded yet.", "events": []})
 
-    summary_prompt = """
-        You are a productivity coach. You are given a JSON array of browsing events. 
-        Each event has: timestamp (ISO), url, blocked (boolean), and reason (string). 
-        Analyze this history and produce a concise report for the user: 
-        1) Top time-wasting sites and how often they were blocked. 
-        2) Any noticeable time-of-day patterns where blocking is frequent. 
-        3) 2-3 actionable suggestions to improve focus. 
-        Keep the report under 250 words."""
-
     try:
-        contents = [
-            {"role": "user", "parts": [
-                {"text": summary_prompt},
-                {"text": "\n\nBrowsing events JSON:\n" + json.dumps(events, indent=2)}
-            ]}
-        ]
-        response = model.generate_content(contents)
-        text = "".join(part.text or "" for part in response.parts) if getattr(response, "parts", None) else str(response)
+        text = generate_history_report_with_adk(events)
     except Exception as exc:
         text = f"Error generating history report: {exc}"
 
+    # As a safety net, post-process any bare 10-digit UNIX timestamps in the
+    # report text and replace them with human-readable local times.
+    if unix_to_local_time is not None and isinstance(text, str):
+        pattern = re.compile(r"\b(1[0-9]{9})\b")  # simple 10-digit UNIX ts starting with 1
+
+        def _replace_ts(match: re.Match) -> str:
+            raw = match.group(1)
+            try:
+                ts = float(raw)
+            except ValueError:
+                return raw
+            try:
+                return unix_to_local_time(ts)
+            except Exception:
+                return raw
+
+        text = pattern.sub(_replace_ts, text)
+
     return jsonify({"report": text, "events": events})
-
-@app.route('/whitelist', methods=['POST'])
-def add_to_whitelist():
-    """Add a site to the whitelist."""
-    data = request.get_json()
-    site = data.get('site', '').lower()
-    
-    if not site:
-        return jsonify({"error": "Site is required"}), 400
-    
-    if site not in CONFIG["whitelist"]:
-        CONFIG["whitelist"].append(site)
-    
-    return jsonify({"message": f"Added {site} to whitelist", "whitelist": CONFIG["whitelist"]})
-
 
 @app.route('/ui', methods=['GET'])
 def ui():

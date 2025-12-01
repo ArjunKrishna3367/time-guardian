@@ -26,6 +26,18 @@ if (unblockTimeEl) {
   }
 }
 
+// Handle Go Back button
+const goBackBtn = document.getElementById('goBackBtn');
+if (goBackBtn) {
+  goBackBtn.addEventListener('click', () => {
+    if (window.history.length > 1) {
+      window.history.back();
+    } else {
+      window.close();
+    }
+  });
+}
+
 // Handle whitelist button
 const whitelistBtn = document.getElementById('whitelistBtn');
 if (whitelistBtn) {
@@ -53,5 +65,14 @@ if (whitelistBtn) {
         }
       },
     );
+  });
+}
+
+// Handle "View Productivity Report" button
+const viewReportBtn = document.getElementById('viewReportBtn');
+if (viewReportBtn && chrome && chrome.runtime && chrome.runtime.getURL) {
+  viewReportBtn.addEventListener('click', () => {
+    const reportUrl = chrome.runtime.getURL('report.html');
+    window.location.href = reportUrl;
   });
 }
