@@ -1,0 +1,16 @@
+{
+  "time_wasting_sites": [
+    "instagram.com",
+    "facebook.com",
+    "twitter.com",
+    "reddit.com",
+    "youtube.com",
+    "netflix.com",
+    "tiktok.com",
+    "twitch.tv",
+    "pinterest.com",
+    "9gag.com"
+  ],
+  "block_duration_minutes": 30,
+  "whitelist": []
+}

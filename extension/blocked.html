@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Site Blocked - Time Guardian</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 20px;
+      text-align: center;
+    }
+    .blocked-container {
+      background-color: #f8d7da;
+      border: 1px solid #f5c6cb;
+      border-radius: 5px;
+      padding: 20px;
+      margin-top: 50px;
+    }
+    h1 {
+      color: #721c24;
+    }
+    .site-url {
+      font-weight: bold;
+      word-break: break-all;
+    }
+    .reason {
+      font-style: italic;
+      margin: 15px 0;
+    }
+    .unblock-time {
+      margin: 15px 0;
+      font-size: 0.9em;
+    }
+    button {
+      background-color: #dc3545;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 5px;
+    }
+    button:hover {
+      background-color: #c82333;
+    }
+    #whitelistBtn {
+      background-color: #6c757d;
+    }
+    #whitelistBtn:hover {
+      background-color: #5a6268;
+    }
+  </style>
+</head>
+<body>
+  <div class="blocked-container">
+    <h1>⏱️ Time's Up!</h1>
+    <p>You've reached a time-wasting website that's currently blocked by Time Guardian.</p>
+    
+    <div class="site-url" id="blockedUrl"></div>
+    <div class="reason" id="blockReason"></div>
+    <div class="unblock-time" id="unblockTime"></div>
+    
+    <div>
+      <button onclick="window.history.back()">Go Back</button>
+      <button id="whitelistBtn">Whitelist This Site</button>
+    </div>
+  </div>
+  <script src="blocked.js"></script>
+</body>
+</html>

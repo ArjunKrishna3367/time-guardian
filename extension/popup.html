@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Time Guardian</title>
+  <style>
+    body {
+      width: 300px;
+      padding: 15px;
+      font-family: Arial, sans-serif;
+    }
+    h1 {
+      font-size: 1.2em;
+      color: #4285f4;
+      margin-top: 0;
+    }
+    .status {
+      padding: 10px;
+      margin: 10px 0;
+      border-radius: 4px;
+      text-align: center;
+    }
+    .active {
+      background-color: #e6f4ea;
+      color: #0d652d;
+    }
+    .inactive {
+      background-color: #fce8e6;
+      color: #d93025;
+    }
+    button {
+      background-color: #4285f4;
+      color: white;
+      border: none;
+      padding: 8px 16px;
+      border-radius: 4px;
+      cursor: pointer;
+      width: 100%;
+      margin: 5px 0;
+    }
+    button:hover {
+      background-color: #3367d6;
+    }
+    #blockedSites {
+      margin-top: 15px;
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 4px;
+    }
+    .site-entry {
+      display: flex;
+      justify-content: space-between;
+      padding: 5px 0;
+      border-bottom: 1px solid #eee;
+    }
+    .site-entry:last-child {
+      border-bottom: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>Time Guardian</h1>
+  <div id="status" class="status">Checking status...</div>
+  
+  <div id="blockedSites">
+    <p>Loading blocked sites...</p>
+  </div>
+  
+  <button id="whitelistCurrent">Whitelist Current Site</button>
+  <button id="viewSettings">Settings</button>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
