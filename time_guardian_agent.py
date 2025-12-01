@@ -102,7 +102,7 @@ def load_timeguard_agent():
 api_key = os.getenv('GOOGLE_API_KEY')
 print(api_key)
 genai.configure(api_key=api_key)
-model = genai.GenerativeModel('gemini-pro')
+model = genai.GenerativeModel('gemini-2.5-flash-lite')
 
 def is_time_wasting_site(url: str) -> bool:
     """Check if a URL is in our list of time-wasting sites."""
@@ -205,6 +205,40 @@ def get_blocked_sites():
     """Get the list of currently blocked sites."""
     check_blocked_sites()
     return jsonify({"blocked_sites": blocked_sites})
+
+@app.route('/history_report', methods=['GET'])
+def history_report():
+    agent_module = load_timeguard_agent()
+    get_history_events_from_db = getattr(agent_module, "get_history_events_from_db", None)
+    if get_history_events_from_db is None:
+        return jsonify({"error": "History helper not available in ADK module."}), 500
+
+    events = get_history_events_from_db()
+    if not events:
+        return jsonify({"report": "No browsing history has been recorded yet.", "events": []})
+
+    summary_prompt = """
+        You are a productivity coach. You are given a JSON array of browsing events. 
+        Each event has: timestamp (ISO), url, blocked (boolean), and reason (string). 
+        Analyze this history and produce a concise report for the user: 
+        1) Top time-wasting sites and how often they were blocked. 
+        2) Any noticeable time-of-day patterns where blocking is frequent. 
+        3) 2-3 actionable suggestions to improve focus. 
+        Keep the report under 250 words."""
+
+    try:
+        contents = [
+            {"role": "user", "parts": [
+                {"text": summary_prompt},
+                {"text": "\n\nBrowsing events JSON:\n" + json.dumps(events, indent=2)}
+            ]}
+        ]
+        response = model.generate_content(contents)
+        text = "".join(part.text or "" for part in response.parts) if getattr(response, "parts", None) else str(response)
+    except Exception as exc:
+        text = f"Error generating history report: {exc}"
+
+    return jsonify({"report": text, "events": events})
 
 @app.route('/whitelist', methods=['POST'])
 def add_to_whitelist():
@@ -333,10 +367,8 @@ if __name__ == '__main__':
         with open('config.json', 'r') as f:
             CONFIG.update(json.load(f))
     except FileNotFoundError:
-        # Save default config
         with open('config.json', 'w') as f:
             json.dump(CONFIG, f, indent=2)
     
     print("Starting Time Guardian Agent...")
-    print(f"Blocking time-wasting sites: {', '.join(CONFIG['time_wasting_sites'])}")
     app.run(host='0.0.0.0', port=5000, debug=True)

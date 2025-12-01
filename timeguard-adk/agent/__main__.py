@@ -21,7 +21,7 @@ from google.adk.apps.app import App, EventsCompactionConfig
 from google.adk.models.google_llm import Gemini
 from google.adk.sessions import DatabaseSessionService
 from google.adk.sessions import InMemorySessionService
-from google.adk.runners import InMemoryRunner
+from google.adk.runners import Runner
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from dotenv import load_dotenv
@@ -47,11 +47,12 @@ TIME_WASTING_KEYWORDS = [
 LLM_MODEL_NAME = os.getenv("TIMEGUARD_MODEL_NAME", "gemini-2.0-flash")
 _llm_agent: Agent | None = None
 
-# Simple in-memory runner setup for local classification.
+# Simple runner setup for local classification, backed by a SQLite DB so
+# sessions persist across runs.
 APP_NAME = "timeguard_app"
 USER_ID = "timeguard_user"
 SESSION_ID = "timeguard_session"
-_runner: InMemoryRunner | None = None
+_runner: Runner | None = None
 
 
 def get_llm_agent() -> Agent:
@@ -88,7 +89,7 @@ def get_llm_agent() -> Agent:
     return _llm_agent
 
 
-def get_runner() -> InMemoryRunner:
+def get_runner() -> Runner:
     """Build (once) and return an InMemoryRunner for the LLM agent.
 
     This is intended for local use/testing. It creates a single in-memory
@@ -100,22 +101,32 @@ def get_runner() -> InMemoryRunner:
         return _runner
 
     agent = get_llm_agent()
-    _runner = InMemoryRunner(agent=agent, app_name=APP_NAME)
+
+    # Use a local SQLite database for ADK sessions. The aiosqlite driver is
+    # used by SQLAlchemy's async engine under the hood.
+    db_url = "sqlite+aiosqlite:///timeguard_sessions.db"
+    session_service = DatabaseSessionService(db_url=db_url)
+
+    _runner = Runner(
+        app_name=APP_NAME,
+        agent=agent,
+        session_service=session_service,
+    )
 
     async def _ensure_session() -> None:
-        session = await _runner.session_service.get_session(  # type: ignore[func-returns-value]
+        session = await session_service.get_session(
             app_name=APP_NAME,
             user_id=USER_ID,
             session_id=SESSION_ID,
         )
         if not session:
-            await _runner.session_service.create_session(  # type: ignore[func-returns-value]
+            await session_service.create_session(
                 app_name=APP_NAME,
                 user_id=USER_ID,
                 session_id=SESSION_ID,
             )
 
-    # Create the in-memory session once.
+    # Lazily create the initial session once so subsequent calls can reuse it.
     asyncio.run(_ensure_session())
 
     return _runner
@@ -221,6 +232,131 @@ def classify_website(url: str, context: str | None = None) -> Dict[str, Any]:
 
     # Fallback path: deterministic heuristic.
     return _heuristic_classification(url, context=context)
+
+
+def get_history_events_from_db() -> list[Dict[str, Any]]:
+    """Load URL classification history from the ADK SQLite session DB.
+
+    This inspects the stored session events for the single configured
+    (APP_NAME, USER_ID, SESSION_ID) and attempts to reconstruct a list of
+    simplified history entries with shape:
+
+        {"timestamp": str | None, "url": str, "blocked": bool, "reason": str}
+
+    It pairs user messages (which carry the URL) with model responses
+    (which carry is_time_wasting / reason) by shared invocation_id.
+    """
+
+    db_url = "sqlite+aiosqlite:///timeguard_sessions.db"
+    session_service = DatabaseSessionService(db_url=db_url)
+
+    async def _collect() -> list[Dict[str, Any]]:
+        session = await session_service.get_session(
+            app_name=APP_NAME,
+            user_id=USER_ID,
+            session_id=SESSION_ID,
+        )
+        if not session or not getattr(session, "events", None):
+            return []
+
+        history: list[Dict[str, Any]] = []
+        agent_name = getattr(get_llm_agent(), "name", "")
+
+        # Walk events in chronological order, pairing each user URL message
+        # with the next model response that returns a JSON object containing
+        # is_time_wasting / reason.
+        pending_user: Dict[str, Any] | None = None
+        # print(session.events)
+
+        for ev in session.events:
+            author = getattr(ev, "author", "") or ""
+            content = getattr(ev, "content", None)
+
+            if author == "user":
+                if content is None or not getattr(content, "parts", None):
+                    continue
+                part = content.parts[0]
+                text = getattr(part, "text", None)
+                if not text:
+                    continue
+                try:
+                    payload = json.loads(text)
+                except Exception:
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                url = payload.get("url")
+                if not isinstance(url, str):
+                    continue
+                ts = getattr(ev, "create_time", None)
+                pending_user = {
+                    "url": url,
+                    "timestamp": str(ts) if ts is not None else None,
+                }
+                continue
+
+            if author != agent_name:
+                continue
+            if not pending_user:
+                continue
+            if content is None or not getattr(content, "parts", None):
+                continue
+            part = content.parts[0]
+            raw_text = getattr(part, "text", None)
+            if not raw_text:
+                continue
+
+            text = raw_text.strip()
+
+            # Model responses are currently wrapped in ```json code fences; try
+            # to robustly extract the JSON object.
+            if text.startswith("```"):
+                # Drop leading/backtick language marker and trailing fence.
+                # e.g. ```json\n{...}\n``` -> {...}
+                # Remove leading ```json or ``` and trailing ```.
+                text_no_fence = text.strip("`")
+                # Fallback to bracket extraction below.
+                text = text_no_fence
+
+            # Try to locate a JSON object between the first '{' and last '}'.
+            start = text.find("{")
+            end = text.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = text[start : end + 1]
+            else:
+                candidate = text
+
+            try:
+                payload = json.loads(candidate)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if "is_time_wasting" not in payload:
+                continue
+
+            is_tw = bool(payload.get("is_time_wasting"))
+            reason = str(payload.get("reason", ""))
+
+            history.append(
+                {
+                    "timestamp": pending_user.get("timestamp"),
+                    "url": pending_user["url"],
+                    "blocked": is_tw,
+                    "reason": reason,
+                }
+            )
+
+            pending_user = None
+
+        return history
+
+    try:
+        return asyncio.run(_collect())
+    except RuntimeError:
+        # If we're already in an event loop (e.g. called from async context),
+        # fall back to an empty list rather than crashing.
+        return []
 
 
 def main(argv: list[str] | None = None) -> int:

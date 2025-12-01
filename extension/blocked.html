@@ -67,6 +67,52 @@
       <button id="whitelistBtn">Whitelist This Site</button>
     </div>
   </div>
-  <script src="blocked.js"></script>
+
+  <script>
+    // Get URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const blockedUrl = urlParams.get('url') || 'this website';
+    const reason = urlParams.get('reason') || 'Time-wasting site';
+    const unblockTime = urlParams.get('unblock_time');
+    
+    // Update the page with the blocked site info
+    document.getElementById('blockedUrl').textContent = blockedUrl;
+    document.getElementById('blockReason').textContent = `AI's reason: ${reason}`;
+    
+    if (unblockTime) {
+      const unblockDate = new Date(unblockTime);
+      document.getElementById('unblockTime').textContent = 
+        `This site will be unblocked at ${unblockDate.toLocaleTimeString()}`;
+    } else {
+      document.getElementById('unblockTime').textContent = 
+        'This site is permanently blocked.';
+    }
+    
+    // Handle whitelist button
+    document.getElementById('whitelistBtn').addEventListener('click', () => {
+      // Get the domain from the URL
+      let domain = '';
+      try {
+        const url = new URL(blockedUrl.startsWith('http') ? blockedUrl : `https://${blockedUrl}`);
+        domain = url.hostname;
+      } catch (e) {
+        console.error('Error parsing URL:', e);
+        domain = blockedUrl;
+      }
+      
+      // Send message to background script to whitelist the site
+      chrome.runtime.sendMessage({
+        action: 'whitelistSite',
+        site: domain
+      }, (response) => {
+        if (response && !response.error) {
+          alert(`Successfully whitelisted ${domain}. You can now visit the site.`);
+          window.location.href = blockedUrl;
+        } else {
+          alert(`Failed to whitelist site: ${response?.error || 'Unknown error'}`);
+        }
+      });
+    });
+  </script>
 </body>
 </html>

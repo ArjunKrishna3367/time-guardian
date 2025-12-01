@@ -8,8 +8,7 @@
     "netflix.com",
     "tiktok.com",
     "twitch.tv",
-    "pinterest.com",
-    "9gag.com"
+    "pinterest.com"
   ],
   "block_duration_minutes": 30,
   "whitelist": []
