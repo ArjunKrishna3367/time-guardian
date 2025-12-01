@@ -1,14 +1,3 @@
-"""Entry point for the TimeGuard agent using Google's Agent Development Kit.
-
-This agent is responsible for deciding whether a given website is time-wasting
-(e.g., social media, gaming, or entertainment) and returning a structured
-response that can be used by a browser extension or backend service to block
-or allow the site.
-
-You will need to set the GOOGLE_API_KEY environment variable with a valid
-key for the Google AI/Vertex model you want to use.
-"""
-
 import os
 import sys
 import json
@@ -18,12 +7,8 @@ import asyncio
 from datetime import datetime
 
 from google.adk.agents import Agent, LlmAgent, SequentialAgent
-from google.adk.apps.app import App, EventsCompactionConfig
-from google.adk.models.google_llm import Gemini
 from google.adk.sessions import DatabaseSessionService
-from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
-from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 from dotenv import load_dotenv
 
@@ -479,7 +464,7 @@ def _get_history_coach() -> Agent:
             - Do NOT use headings, bullet points, numbered lists, or symbols like #, *, -, or •.
             - Write as one or more simple paragraphs of plain text only.
             - If any UNIX timestamps (10 digit numbers such as 1764565000) appear, use the 
-            unix_to_local_time tool to rewrite them into a human-readable version.
+            unix_to_local_time tool to rewrite them into a human-readable version. Do not mention that this conversion occured in the report.
 
             Keep the report under 250 words.
         """,
